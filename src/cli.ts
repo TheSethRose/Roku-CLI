@@ -4,7 +4,7 @@ import { CONFIG_PATH, readConfig, removeDevice, saveDevice, writeConfig } from "
 import { discoverRokus } from "./discovery.ts";
 import { CONVENIENCE_KEYS, resolveKey } from "./keys.ts";
 import { RokuClient } from "./roku-client.ts";
-import type { Config, DeviceListEntry, OutputMode, RokuActiveApp, RokuApp, SavedDevice } from "./types.ts";
+import type { Config, DeviceListEntry, DiscoveredDevice, JsonObject, OutputMode, RokuActiveApp, RokuApp, SavedDevice } from "./types.ts";
 import { assertIp, clampNumber, CliError, isIp, normalizeName, parseJsonFlag, parsePositiveInt, requireArg } from "./utils.ts";
 
 const TEXT_MAX_LENGTH = 256;
@@ -34,10 +34,10 @@ async function main(): Promise<void> {
       await commandDiscover(output);
       break;
     case "add":
-      await commandAdd(requireArg(args[0], "name"), requireArg(args[1], "ip"), output);
+      await commandAdd(args, output);
       break;
     case "remove":
-      await commandRemove(requireArg(args[0], "device"), output);
+      await commandRemove(args, output);
       break;
     case "devices":
       await commandDevices(output);
@@ -100,21 +100,58 @@ async function commandDiscover(output: OutputMode): Promise<void> {
   });
 }
 
-async function commandAdd(name: string, ipInput: string, output: OutputMode): Promise<void> {
+async function commandAdd(args: string[], output: OutputMode): Promise<void> {
+  requireArg(args[0], "target");
+  const lastArg = args.at(-1);
+
+  if (args.length >= 2 && lastArg && isIp(lastArg)) {
+    await commandAddManual(args.slice(0, -1).join(" "), lastArg, output);
+    return;
+  }
+
+  await commandAddDiscovered(args.join(" "), output);
+}
+
+async function commandAddManual(name: string, ipInput: string, output: OutputMode): Promise<void> {
   const ip = assertIp(ipInput);
   const client = new RokuClient(ip);
   const deviceInfo = await client.getDeviceInfo();
-  const normalized = await saveDevice(name, {
+  const savedName = await saveDevice(name, {
     ip,
     lastSeen: new Date().toISOString(),
     deviceInfo
   });
 
-  print(output, { name: normalized, ip, configPath: CONFIG_PATH }, () => `Saved ${normalized} at ${ip}.`);
+  print(output, { name: savedName, ip, configPath: CONFIG_PATH }, () => `Saved ${savedName} at ${ip}.`);
 }
 
-async function commandRemove(deviceArg: string, output: OutputMode): Promise<void> {
-  const name = await removeDevice(deviceArg);
+async function commandAddDiscovered(target: string, output: OutputMode): Promise<void> {
+  const discovered = isIp(target) ? undefined : await resolveDiscoveredTarget(target);
+  const ip = discovered?.ip ?? (isIp(target) ? assertIp(target) : undefined);
+
+  if (!ip) {
+    throw new CliError(`No discovered Roku matched "${target}". Run "roku discover --json" or use "roku add <name> <ip>".`);
+  }
+
+  const client = new RokuClient(ip);
+  const deviceInfo = await client.getDeviceInfo();
+  const config = await readConfig();
+  const savedName = await saveDevice(deriveDeviceName(target, ip, discovered, deviceInfo, config), {
+    ip,
+    lastSeen: new Date().toISOString(),
+    deviceInfo
+  });
+
+  print(output, { name: savedName, ip, configPath: CONFIG_PATH }, () => `Saved ${savedName} at ${ip}.`);
+}
+
+async function commandRemove(args: string[], output: OutputMode): Promise<void> {
+  const target = args.join(" ");
+  requireArg(target, "target");
+  const config = await readConfig();
+  const name = await resolveSavedDeviceForRemoval(target, config);
+
+  await removeDevice(name);
   print(output, { name, removed: true }, () => `Removed ${name}.`);
 }
 
@@ -349,6 +386,154 @@ function parseDeviceOption(args: string[]): { args: string[]; device?: string } 
   return { args: filtered, device };
 }
 
+async function resolveDiscoveredTarget(target: string): Promise<DiscoveredDevice | undefined> {
+  const devices = await discoverRokus();
+  const matches = devices.filter((device) => discoveredDeviceMatches(device, target));
+
+  if (matches.length > 1) {
+    throw new CliError(`Multiple discovered Rokus match "${target}": ${matches.map(formatDiscoveredMatch).join(", ")}`);
+  }
+
+  return matches[0];
+}
+
+async function resolveSavedDeviceForRemoval(target: string, config: Config): Promise<string> {
+  const savedName = tryNormalizeName(target);
+
+  if (savedName && config.devices[savedName]) {
+    return savedName;
+  }
+
+  const savedMatches = Object.entries(config.devices).filter(([name, device]) => savedDeviceMatches(name, device, target));
+
+  if (savedMatches.length === 1) {
+    return savedMatches[0][0];
+  }
+
+  if (savedMatches.length > 1) {
+    throw new CliError(`Multiple saved devices match "${target}": ${savedMatches.map(([name, device]) => `${name} (${device.ip})`).join(", ")}`);
+  }
+
+  const discovered = await resolveDiscoveredTarget(target);
+
+  if (discovered) {
+    const discoveredMatches = Object.entries(config.devices).filter(([, device]) => device.ip === discovered.ip);
+
+    if (discoveredMatches.length === 1) {
+      return discoveredMatches[0][0];
+    }
+
+    if (discoveredMatches.length > 1) {
+      throw new CliError(`Multiple saved devices use ${discovered.ip}: ${discoveredMatches.map(([name]) => name).join(", ")}`);
+    }
+  }
+
+  throw new CliError(`Unknown saved device: ${target}`);
+}
+
+function deriveDeviceName(target: string, ip: string, discovered: DiscoveredDevice | undefined, deviceInfo: JsonObject, config: Config): string {
+  const base =
+    stringField(deviceInfo, "friendly-device-name") ??
+    stringField(deviceInfo, "user-device-name") ??
+    discovered?.friendlyName ??
+    stringField(deviceInfo, "model-name") ??
+    discovered?.model ??
+    (isIp(target) ? `roku-${ip.split(".").at(-1) ?? "device"}` : target);
+
+  return uniqueDeviceName(base, ip, deviceInfo, config);
+}
+
+function uniqueDeviceName(base: string, ip: string, deviceInfo: JsonObject, config: Config): string {
+  const normalized = normalizeName(base);
+  const existing = config.devices[normalized];
+
+  if (!existing || existing.ip === ip) {
+    return normalized;
+  }
+
+  const suffix = suffixFromDeviceInfo(deviceInfo) ?? ip.split(".").at(-1) ?? "device";
+  const withSuffix = normalizeName(`${normalized}-${suffix}`);
+  const suffixedExisting = config.devices[withSuffix];
+
+  if (!suffixedExisting || suffixedExisting.ip === ip) {
+    return withSuffix;
+  }
+
+  for (let index = 2; index < 100; index += 1) {
+    const candidate = normalizeName(`${withSuffix}-${index}`);
+    const candidateExisting = config.devices[candidate];
+
+    if (!candidateExisting || candidateExisting.ip === ip) {
+      return candidate;
+    }
+  }
+
+  throw new CliError(`Could not create a unique saved name for ${ip}.`);
+}
+
+function suffixFromDeviceInfo(deviceInfo: JsonObject): string | undefined {
+  const id = stringField(deviceInfo, "device-id") ?? stringField(deviceInfo, "serial-number");
+  return id ? id.slice(-4) : undefined;
+}
+
+function savedDeviceMatches(name: string, device: SavedDevice, target: string): boolean {
+  if (device.ip === target) return true;
+  if (normalizeIdentity(name) === normalizeIdentity(target)) return true;
+
+  return deviceInfoIdentities(device.deviceInfo ?? {}).some((identity) => identity === normalizeIdentity(target));
+}
+
+function discoveredDeviceMatches(device: DiscoveredDevice, target: string): boolean {
+  if (device.ip === target) return true;
+
+  const normalizedTarget = normalizeIdentity(target);
+  const identities = [device.deviceId, device.serialNumber, device.friendlyName, device.model]
+    .filter((value): value is string => Boolean(value))
+    .map(normalizeIdentity);
+
+  return identities.includes(normalizedTarget);
+}
+
+function deviceInfoIdentities(deviceInfo: JsonObject): string[] {
+  return [
+    "device-id",
+    "serial-number",
+    "friendly-device-name",
+    "user-device-name",
+    "model-name",
+    "model-number"
+  ]
+    .map((key) => stringField(deviceInfo, key))
+    .filter((value): value is string => Boolean(value))
+    .map(normalizeIdentity);
+}
+
+function normalizeIdentity(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function tryNormalizeName(value: string): string | undefined {
+  try {
+    return normalizeName(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function stringField(value: JsonObject, key: string): string | undefined {
+  const field = value[key];
+  return typeof field === "string" && field ? field : undefined;
+}
+
+function formatDiscoveredMatch(device: DiscoveredDevice): string {
+  const label = device.friendlyName ?? device.model ?? device.deviceId ?? device.serialNumber ?? "Roku";
+  return `${label} (${device.ip})`;
+}
+
 function print(output: OutputMode, jsonValue: unknown, text: () => string): void {
   if (output === "json") {
     console.log(JSON.stringify(jsonValue, null, 2));
@@ -372,8 +557,9 @@ function printHelp(): void {
 
 Setup:
   discover
+  add <ip|id|name>
   add <name> <ip>
-  remove <device>
+  remove <ip|id|name>
 
 Agent commands:
   devices
@@ -382,7 +568,7 @@ Agent commands:
 
 Examples:
   roku discover --json
-  roku add <name> <ip>
+  roku add <ip|id|name>
   roku action launch Netflix --device <name>
   roku action home --device <name>
   roku action type "star trek" --device <name>
@@ -397,8 +583,9 @@ function printAdvancedHelp(): void {
 
 Setup and agent commands:
   discover
+  add <ip|id|name>
   add <name> <ip>
-  remove <device>
+  remove <ip|id|name>
   devices
   status --device <device>
   action <action> [value] --device <device>

@@ -18,7 +18,7 @@ bun run src/cli.ts discover --json
 2. Register the target once with a stable lowercase kebab-case name:
 
 ```bash
-bun run src/cli.ts add living-room 192.168.1.78
+bun run src/cli.ts add <ip|device-id|serial|friendly-name>
 ```
 
 3. After registration, use fully qualified commands. Always include `--device`.
@@ -38,7 +38,7 @@ Prefer these agent-facing commands:
 bun run src/cli.ts devices --json
 bun run src/cli.ts status --device <device> --json
 bun run src/cli.ts action <action> [value] --device <device>
-bun run src/cli.ts remove <device>
+bun run src/cli.ts remove <ip|device-id|serial|saved-name>
 ```
 
 Supported actions:
@@ -67,9 +67,10 @@ hold <key> <ms>
 ## Rules
 
 - Treat Roku control as stateless. There is no connect or disconnect step.
+- Use `add <target>` after discovery; target may be IP, device id, serial number, or friendly name. Use `add <name> <ip>` only when a manual saved name is needed.
 - Prefer saved device names over raw IPs after setup.
 - Use `--json` for inspection commands when another agent will parse output.
 - Do not call `apps` before `action launch`; launch resolves and refreshes apps itself.
 - If `action launch` reports ambiguous app matches, ask the user which app to launch.
-- Use `remove <device>` when a saved device should no longer be available.
+- Use `remove <target>` when a saved device should no longer be available; target may be saved name, IP, device id, serial number, or friendly name.
 - Do not use arbitrary URLs, paths, shell commands, or raw Roku protocol endpoints.

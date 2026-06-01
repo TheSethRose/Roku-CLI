@@ -14,7 +14,7 @@ bun install
 
 ```sh
 bun run src/cli.ts discover
-bun run src/cli.ts add living-room 192.168.1.78
+bun run src/cli.ts add 192.168.1.78
 bun run src/cli.ts action launch Netflix --device living-room
 bun run src/cli.ts action home --device living-room
 bun run src/cli.ts action type "star trek" --device living-room
@@ -52,8 +52,22 @@ Roku ECP is stateless HTTP, so there is no connect or disconnect step. Discover/
 
 ```sh
 bun run src/cli.ts discover --json
-bun run src/cli.ts add living-room 192.168.1.78
+bun run src/cli.ts add 192.168.1.78
 bun run src/cli.ts action launch Netflix --device living-room
+```
+
+`add` can resolve a discovered Roku by IP, device id, serial number, or discovered friendly name:
+
+```sh
+bun run src/cli.ts add 192.168.1.78
+bun run src/cli.ts add S0EF333HGTJ8
+bun run src/cli.ts add "Living Room TV"
+```
+
+Manual naming is still supported:
+
+```sh
+bun run src/cli.ts add living-room 192.168.1.78
 ```
 
 Preferred agent command pattern:
@@ -71,14 +85,16 @@ bun run src/cli.ts action launch Netflix --device living-room
 bun run src/cli.ts action volume-up --device living-room
 bun run src/cli.ts action type "star trek" --device living-room
 bun run src/cli.ts remove living-room
+bun run src/cli.ts remove 192.168.1.78
 ```
 
 ## Primary Commands
 
 ```text
 discover
+add <ip|id|name>
 add <name> <ip>
-remove <device>
+remove <ip|id|name>
 devices
 status --device <device>
 action <action> [value] --device <device>
