@@ -26,6 +26,7 @@ Most commands also support JSON output:
 ```sh
 bun run src/cli.ts discover --json
 bun run src/cli.ts devices --json
+bun run src/cli.ts channels --device living-room --json
 bun run src/cli.ts status --device living-room --json
 ```
 
@@ -56,12 +57,24 @@ bun run src/cli.ts add 192.168.1.78
 bun run src/cli.ts action launch Netflix --device living-room
 ```
 
+If keypresses or channel listing fail with HTTP 403, the Roku is probably in Limited mode. On the Roku, set:
+
+```text
+Settings > System > Advanced system settings > Control by mobile apps > Network access > Permissive
+```
+
 `add` can resolve a discovered Roku by IP, device id, serial number, or discovered friendly name:
 
 ```sh
 bun run src/cli.ts add 192.168.1.78
 bun run src/cli.ts add S0EF333HGTJ8
 bun run src/cli.ts add "Living Room TV"
+```
+
+Interactive `add` prompts for the saved friendly name. Agents and scripts should pass it explicitly:
+
+```sh
+bun run src/cli.ts add S0EF333HGTJ8 --name living-room
 ```
 
 Manual naming is still supported:
@@ -80,6 +93,7 @@ Examples:
 
 ```sh
 bun run src/cli.ts devices --json
+bun run src/cli.ts channels --device living-room --json
 bun run src/cli.ts status --device living-room --json
 bun run src/cli.ts action launch Netflix --device living-room
 bun run src/cli.ts action volume-up --device living-room
@@ -93,9 +107,11 @@ bun run src/cli.ts remove 192.168.1.78
 ```text
 discover
 add <ip|id|name>
+add <ip|id|name> --name <saved-name>
 add <name> <ip>
 remove <ip|id|name>
 devices
+channels --device <device>
 status --device <device>
 action <action> [value] --device <device>
 ```

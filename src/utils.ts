@@ -7,6 +7,17 @@ export class CliError extends Error {
   }
 }
 
+export class RokuHttpError extends CliError {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly body: string
+  ) {
+    super(message);
+    this.name = "RokuHttpError";
+  }
+}
+
 export function normalizeName(name: string): string {
   const normalized = name
     .trim()
@@ -57,11 +68,13 @@ export function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs 
 }
 
 export async function readResponseText(response: Response, context: string): Promise<string> {
+  const text = await response.text();
+
   if (!response.ok) {
-    throw new CliError(`${context} failed with HTTP ${response.status}.`);
+    throw new RokuHttpError(`${context} failed with HTTP ${response.status}.`, response.status, text);
   }
 
-  return response.text();
+  return text;
 }
 
 export function requireArg(value: string | undefined, label: string): string {

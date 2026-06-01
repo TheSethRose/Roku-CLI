@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
-import { appsToCache, resolveApp } from "./app-resolver.ts";
+import { createInterface } from "node:readline/promises";
+import { appsToCache, BUILT_IN_CHANNELS, resolveApp } from "./app-resolver.ts";
 import { CONFIG_PATH, readConfig, removeDevice, saveDevice, writeConfig } from "./config.ts";
 import { discoverRokus } from "./discovery.ts";
 import { CONVENIENCE_KEYS, resolveKey } from "./keys.ts";
 import { RokuClient } from "./roku-client.ts";
 import type { Config, DeviceListEntry, DiscoveredDevice, JsonObject, OutputMode, RokuActiveApp, RokuApp, SavedDevice } from "./types.ts";
-import { assertIp, clampNumber, CliError, isIp, normalizeName, parseJsonFlag, parsePositiveInt, requireArg } from "./utils.ts";
+import { assertIp, clampNumber, CliError, isIp, normalizeName, parseJsonFlag, parsePositiveInt, requireArg, RokuHttpError } from "./utils.ts";
 
 const TEXT_MAX_LENGTH = 256;
 
@@ -41,6 +42,12 @@ async function main(): Promise<void> {
       break;
     case "devices":
       await commandDevices(output);
+      break;
+    case "channels":
+      await commandChannels(args, output);
+      break;
+    case "known-channels":
+      await commandKnownChannels(output);
       break;
     case "list":
       await commandList(output);
@@ -101,31 +108,34 @@ async function commandDiscover(output: OutputMode): Promise<void> {
 }
 
 async function commandAdd(args: string[], output: OutputMode): Promise<void> {
-  requireArg(args[0], "target");
-  const lastArg = args.at(-1);
+  const parsed = parseNameOption(args);
+  requireArg(parsed.args[0], "target");
+  const lastArg = parsed.args.at(-1);
 
-  if (args.length >= 2 && lastArg && isIp(lastArg)) {
-    await commandAddManual(args.slice(0, -1).join(" "), lastArg, output);
+  if (parsed.args.length >= 2 && lastArg && isIp(lastArg)) {
+    await commandAddManual(parsed.name ?? parsed.args.slice(0, -1).join(" "), lastArg, output);
     return;
   }
 
-  await commandAddDiscovered(args.join(" "), output);
+  await commandAddDiscovered(parsed.args.join(" "), parsed.name, output);
 }
 
 async function commandAddManual(name: string, ipInput: string, output: OutputMode): Promise<void> {
   const ip = assertIp(ipInput);
   const client = new RokuClient(ip);
   const deviceInfo = await client.getDeviceInfo();
+  const apps = await fetchAppsOrEmpty(client);
   const savedName = await saveDevice(name, {
     ip,
     lastSeen: new Date().toISOString(),
-    deviceInfo
+    deviceInfo,
+    ...(apps.length > 0 ? { apps: appsToCache(apps) } : {})
   });
 
-  print(output, { name: savedName, ip, configPath: CONFIG_PATH }, () => `Saved ${savedName} at ${ip}.`);
+  print(output, { name: savedName, ip, channelCount: apps.length, configPath: CONFIG_PATH }, () => `Saved ${savedName} at ${ip}${apps.length ? ` with ${apps.length} channels cached` : ""}.`);
 }
 
-async function commandAddDiscovered(target: string, output: OutputMode): Promise<void> {
+async function commandAddDiscovered(target: string, nameInput: string | undefined, output: OutputMode): Promise<void> {
   const discovered = isIp(target) ? undefined : await resolveDiscoveredTarget(target);
   const ip = discovered?.ip ?? (isIp(target) ? assertIp(target) : undefined);
 
@@ -135,14 +145,18 @@ async function commandAddDiscovered(target: string, output: OutputMode): Promise
 
   const client = new RokuClient(ip);
   const deviceInfo = await client.getDeviceInfo();
+  const apps = await fetchAppsOrEmpty(client);
   const config = await readConfig();
-  const savedName = await saveDevice(deriveDeviceName(target, ip, discovered, deviceInfo, config), {
+  const suggestedName = deriveDeviceName(target, ip, discovered, deviceInfo, config);
+  const name = nameInput ?? (await promptForDeviceName(suggestedName));
+  const savedName = await saveDevice(name, {
     ip,
     lastSeen: new Date().toISOString(),
-    deviceInfo
+    deviceInfo,
+    ...(apps.length > 0 ? { apps: appsToCache(apps) } : {})
   });
 
-  print(output, { name: savedName, ip, configPath: CONFIG_PATH }, () => `Saved ${savedName} at ${ip}.`);
+  print(output, { name: savedName, ip, channelCount: apps.length, configPath: CONFIG_PATH }, () => `Saved ${savedName} at ${ip}${apps.length ? ` with ${apps.length} channels cached` : ""}.`);
 }
 
 async function commandRemove(args: string[], output: OutputMode): Promise<void> {
@@ -179,6 +193,25 @@ async function commandList(output: OutputMode): Promise<void> {
   });
 }
 
+async function commandChannels(args: string[], output: OutputMode): Promise<RokuApp[]> {
+  const parsed = parseDeviceOption(args);
+  const deviceArg = parsed.device ?? parsed.args[0];
+
+  if (!deviceArg) {
+    throw new CliError("Missing required option: --device <device>");
+  }
+
+  return commandApps(deviceArg, output);
+}
+
+async function commandKnownChannels(output: OutputMode): Promise<void> {
+  const channels = Object.entries(BUILT_IN_CHANNELS)
+    .map(([name, id]) => ({ name, id }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  print(output, { channels }, () => channels.map((channel) => `${channel.name}  ${channel.id}`).join("\n"));
+}
+
 async function commandStatus(args: string[], output: OutputMode): Promise<void> {
   const parsed = parseDeviceOption(args);
   const deviceArg = parsed.device ?? parsed.args[0];
@@ -190,16 +223,19 @@ async function commandStatus(args: string[], output: OutputMode): Promise<void> 
   const { client, name, ip } = await resolveDevice(deviceArg);
 
   try {
-    const [deviceInfo, activeApp, apps] = await Promise.all([client.getDeviceInfo(), client.getActiveApp(), client.getApps()]);
+    const [deviceInfo, activeApp] = await Promise.all([client.getDeviceInfo(), client.getActiveApp()]);
+    const apps = await fetchAppsOrEmpty(client);
     await updateSavedDevice(name, {
       deviceInfo,
-      apps: appsToCache(apps),
+      ...(apps.length > 0 ? { apps: appsToCache(apps) } : {}),
       lastSeen: new Date().toISOString()
     });
 
-    print(output, { device: name ?? deviceArg, ip, online: true, activeApp, deviceInfo, appCount: apps.length }, () => {
+    const ecpMode = stringField(deviceInfo, "ecp-setting-mode");
+    print(output, { device: name ?? deviceArg, ip, online: true, activeApp, deviceInfo, appCount: apps.length, ecpMode }, () => {
       const active = activeApp ? formatActiveApp(activeApp) : "none";
-      return `${name ?? deviceArg}  ${ip}  online  active: ${active}  apps: ${apps.length}`;
+      const mode = ecpMode ? `  mode: ${ecpMode}` : "";
+      return `${name ?? deviceArg}  ${ip}  online  active: ${active}  apps: ${apps.length}${mode}`;
     });
   } catch {
     print(output, { device: name ?? deviceArg, ip, online: false, activeApp: null }, () => `${name ?? deviceArg}  ${ip}  offline`);
@@ -260,11 +296,11 @@ async function commandHold(deviceArg: string, key: string, msInput: string, outp
 
 async function commandLaunch(deviceArg: string, appInput: string, output: OutputMode): Promise<void> {
   const resolved = await resolveDevice(deviceArg);
-  const apps = await resolved.client.getApps();
+  const apps = await fetchAppsOrEmpty(resolved.client);
   const appId = resolveApp(appInput, resolved.savedDevice, apps);
 
   await resolved.client.launch(appId);
-  await updateSavedDevice(resolved.name, { apps: appsToCache(apps), lastSeen: new Date().toISOString() });
+  await updateSavedDevice(resolved.name, apps.length > 0 ? { apps: appsToCache(apps), lastSeen: new Date().toISOString() } : { lastSeen: new Date().toISOString() });
 
   print(output, { device: deviceArg, app: appInput, appId }, () => `Launched ${appInput} (${appId}).`);
 }
@@ -321,18 +357,26 @@ async function commandAction(args: string[], output: OutputMode): Promise<void> 
 }
 
 async function resolveDevice(deviceArg: string): Promise<{ client: RokuClient; ip: string; name?: string; savedDevice?: SavedDevice }> {
+  const config = await readConfig();
+
   if (isIp(deviceArg)) {
     const ip = assertIp(deviceArg);
+    const savedMatches = Object.entries(config.devices).filter(([, device]) => device.ip === ip);
+
+    if (savedMatches.length === 1) {
+      const [name, savedDevice] = savedMatches[0];
+      return { client: new RokuClient(savedDevice.ip), ip: savedDevice.ip, name, savedDevice };
+    }
+
+    if (savedMatches.length > 1) {
+      throw new CliError(`Multiple saved devices use ${ip}: ${savedMatches.map(([name]) => name).join(", ")}`);
+    }
+
     return { client: new RokuClient(ip), ip };
   }
 
-  const name = normalizeName(deviceArg);
-  const config = await readConfig();
+  const name = await resolveSavedDeviceForRemoval(deviceArg, config);
   const savedDevice = config.devices[name];
-
-  if (!savedDevice) {
-    throw new CliError(`Unknown device: ${deviceArg}`);
-  }
 
   return { client: new RokuClient(savedDevice.ip), ip: savedDevice.ip, name, savedDevice };
 }
@@ -344,9 +388,10 @@ async function getDeviceList(): Promise<DeviceListEntry[]> {
       const client = new RokuClient(device.ip, 1500);
 
       try {
-        const activeApp = await client.getActiveApp();
+        const [deviceInfo, activeApp] = await Promise.all([client.getDeviceInfo(), client.getActiveApp()]);
         device.lastSeen = new Date().toISOString();
-        return { name, ip: device.ip, online: true, activeApp };
+        device.deviceInfo = deviceInfo;
+        return { name, ip: device.ip, online: true, activeApp, ecpMode: stringField(deviceInfo, "ecp-setting-mode") };
       } catch {
         return { name, ip: device.ip, online: false, activeApp: null };
       }
@@ -355,6 +400,14 @@ async function getDeviceList(): Promise<DeviceListEntry[]> {
 
   await writeConfig(config);
   return devices;
+}
+
+async function fetchAppsOrEmpty(client: RokuClient): Promise<RokuApp[]> {
+  try {
+    return await client.getApps();
+  } catch {
+    return [];
+  }
 }
 
 async function updateSavedDevice(name: string | undefined, patch: Partial<SavedDevice>): Promise<void> {
@@ -384,6 +437,39 @@ function parseDeviceOption(args: string[]): { args: string[]; device?: string } 
   }
 
   return { args: filtered, device };
+}
+
+function parseNameOption(args: string[]): { args: string[]; name?: string } {
+  const filtered: string[] = [];
+  let name: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--name") {
+      name = requireArg(args[index + 1], "name");
+      index += 1;
+    } else {
+      filtered.push(arg);
+    }
+  }
+
+  return { args: filtered, name };
+}
+
+async function promptForDeviceName(suggestedName: string): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new CliError(`Missing required option: --name <friendly-name>. Suggested name: ${suggestedName}`);
+  }
+
+  const readline = createInterface({ input: process.stdin, output: process.stdout });
+
+  try {
+    const answer = await readline.question(`Save this Roku as [${suggestedName}]: `);
+    return answer.trim() || suggestedName;
+  } finally {
+    readline.close();
+  }
 }
 
 async function resolveDiscoveredTarget(target: string): Promise<DiscoveredDevice | undefined> {
@@ -545,7 +631,8 @@ function print(output: OutputMode, jsonValue: unknown, text: () => string): void
 function formatDeviceListEntry(entry: DeviceListEntry): string {
   const status = entry.online ? "online" : "offline";
   const active = entry.activeApp ? `  active: ${formatActiveApp(entry.activeApp)}` : "";
-  return `${entry.name}  ${entry.ip}  ${status}${active}`;
+  const mode = entry.ecpMode ? `  mode: ${entry.ecpMode}` : "";
+  return `${entry.name}  ${entry.ip}  ${status}${active}${mode}`;
 }
 
 function formatActiveApp(activeApp: RokuActiveApp): string {
@@ -563,12 +650,14 @@ Setup:
 
 Agent commands:
   devices
+  channels --device <device>
   status --device <device>
   action <action> [value] --device <device>
 
 Examples:
   roku discover --json
   roku add <ip|id|name>
+  roku add <ip|id|name> --name <name>
   roku action launch Netflix --device <name>
   roku action home --device <name>
   roku action type "star trek" --device <name>
@@ -587,6 +676,7 @@ Setup and agent commands:
   add <name> <ip>
   remove <ip|id|name>
   devices
+  channels --device <device>
   status --device <device>
   action <action> [value] --device <device>
 
@@ -603,6 +693,14 @@ Low-level/debug commands:
 }
 
 main().catch((error: unknown) => {
+  if (error instanceof RokuHttpError && error.status === 403) {
+    const limitedMessage = error.body.includes("Limited mode")
+      ? " Roku says ECP is in Limited mode."
+      : "";
+    console.error(`${error.message}${limitedMessage} On the Roku, set Settings > System > Advanced system settings > Control by mobile apps > Network access to Permissive.`);
+    process.exit(error.exitCode);
+  }
+
   if (error instanceof CliError) {
     console.error(error.message);
     process.exit(error.exitCode);

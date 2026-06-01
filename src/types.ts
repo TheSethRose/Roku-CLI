@@ -30,6 +30,7 @@ export interface DeviceListEntry {
   ip: string;
   online: boolean;
   activeApp: RokuActiveApp | null;
+  ecpMode?: string;
 }
 
 export interface DiscoveredDevice {
