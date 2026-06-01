@@ -382,11 +382,11 @@ Agent commands:
 
 Examples:
   roku discover --json
-  roku add living-room 192.168.1.78
-  roku action launch Netflix --device living-room
-  roku action home --device living-room
-  roku action type "star trek" --device living-room
-  roku status --device living-room --json
+  roku add <name> <ip>
+  roku action launch Netflix --device <name>
+  roku action home --device <name>
+  roku action type "star trek" --device <name>
+  roku status --device <name> --json
 
 Advanced/debug commands:
   roku help advanced`);
