@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   }
 
   if (command in CONVENIENCE_KEYS) {
-    await commandKey(requireArg(args[0], "device"), CONVENIENCE_KEYS[command], output);
+    await commandHumanAction(command, args, output);
     return;
   }
 
@@ -45,6 +45,12 @@ async function main(): Promise<void> {
       break;
     case "channels":
       await commandChannels(args, output);
+      break;
+    case "use":
+      await commandUse(args, output);
+      break;
+    case "current":
+      await commandCurrent(output);
       break;
     case "known-channels":
       await commandKnownChannels(output);
@@ -68,19 +74,19 @@ async function main(): Promise<void> {
       await commandKey(requireArg(args[0], "device"), resolveKey(requireArg(args[1], "key")), output);
       break;
     case "hold":
-      await commandHold(requireArg(args[0], "device"), resolveKey(requireArg(args[1], "key")), requireArg(args[2], "ms"), output);
+      await commandHumanAction(command, args, output);
       break;
     case "launch":
-      await commandLaunch(requireArg(args[0], "device"), requireArg(args[1], "app"), output);
+      await commandHumanAction(command, args, output);
       break;
     case "type":
-      await commandType(requireArg(args[0], "device"), args.slice(1).join(" "), output);
+      await commandHumanAction(command, args, output);
       break;
     case "action":
       await commandAction(args, output);
       break;
     default:
-      throw new CliError(`Unknown command: ${command}`);
+      await commandDeviceScoped(command, args, output);
   }
 }
 
@@ -181,6 +187,36 @@ async function commandDevices(output: OutputMode): Promise<void> {
   });
 }
 
+async function commandUse(args: string[], output: OutputMode): Promise<void> {
+  const target = args.join(" ");
+  requireArg(target, "device");
+
+  const config = await readConfig();
+  const name = await resolveSavedDeviceForRemoval(target, config);
+  config.defaultDevice = name;
+  await writeConfig(config);
+
+  print(output, { device: name, current: true }, () => `Using ${name}.`);
+}
+
+async function commandCurrent(output: OutputMode): Promise<void> {
+  const config = await readConfig();
+
+  if (!config.defaultDevice) {
+    print(output, { device: null }, () => "No current device set.");
+    return;
+  }
+
+  const device = config.devices[config.defaultDevice];
+
+  if (!device) {
+    print(output, { device: config.defaultDevice, missing: true }, () => `Current device ${config.defaultDevice} is not saved.`);
+    return;
+  }
+
+  print(output, { device: config.defaultDevice, ip: device.ip }, () => `${config.defaultDevice}  ${device.ip}`);
+}
+
 async function commandList(output: OutputMode): Promise<void> {
   const devices = await getDeviceList();
 
@@ -195,11 +231,7 @@ async function commandList(output: OutputMode): Promise<void> {
 
 async function commandChannels(args: string[], output: OutputMode): Promise<RokuApp[]> {
   const parsed = parseDeviceOption(args);
-  const deviceArg = parsed.device ?? parsed.args[0];
-
-  if (!deviceArg) {
-    throw new CliError("Missing required option: --device <device>");
-  }
+  const deviceArg = parsed.device ?? parsed.args[0] ?? (await getDefaultDeviceName());
 
   return commandApps(deviceArg, output);
 }
@@ -214,11 +246,7 @@ async function commandKnownChannels(output: OutputMode): Promise<void> {
 
 async function commandStatus(args: string[], output: OutputMode): Promise<void> {
   const parsed = parseDeviceOption(args);
-  const deviceArg = parsed.device ?? parsed.args[0];
-
-  if (!deviceArg) {
-    throw new CliError("Missing required option: --device <device>");
-  }
+  const deviceArg = parsed.device ?? parsed.args[0] ?? (await getDefaultDeviceName());
 
   const { client, name, ip } = await resolveDevice(deviceArg);
 
@@ -324,26 +352,72 @@ async function commandType(deviceArg: string, text: string, output: OutputMode):
 async function commandAction(args: string[], output: OutputMode): Promise<void> {
   const parsed = parseDeviceOption(args);
   const action = requireArg(parsed.args[0], "action");
-  const value = parsed.args.slice(1).join(" ");
 
   if (!parsed.device) {
     throw new CliError("Missing required option: --device <device>");
   }
 
+  await dispatchDeviceAction(parsed.device, action, parsed.args.slice(1), output);
+}
+
+async function commandHumanAction(action: string, args: string[], output: OutputMode): Promise<void> {
+  const parsed = parseDeviceOption(args);
+  let deviceArg = parsed.device;
+  let actionArgs = parsed.args;
+
+  if (!deviceArg && parsed.args.length > 1) {
+    const maybeDevice = await findSavedDeviceName(parsed.args[0]);
+    if (maybeDevice) {
+      deviceArg = maybeDevice;
+      actionArgs = parsed.args.slice(1);
+    }
+  }
+
+  await dispatchDeviceAction(deviceArg ?? (await getDefaultDeviceName()), action, actionArgs, output);
+}
+
+async function commandDeviceScoped(deviceArg: string, args: string[], output: OutputMode): Promise<void> {
+  if (args.length === 0) {
+    await commandStatus(["--device", deviceArg], output);
+    return;
+  }
+
+  await dispatchDeviceAction(deviceArg, args[0], args.slice(1), output);
+}
+
+async function dispatchDeviceAction(deviceArg: string, action: string, args: string[], output: OutputMode): Promise<void> {
+  if (action === "status") {
+    await commandStatus(["--device", deviceArg], output);
+    return;
+  }
+
+  if (action === "channels" || action === "apps") {
+    await commandChannels(["--device", deviceArg], output);
+    return;
+  }
+
+  if (action === "active") {
+    await commandActive(deviceArg, output);
+    return;
+  }
+
+  if (action === "info") {
+    await commandInfo(deviceArg, output);
+    return;
+  }
+
   if (action === "launch") {
-    await commandLaunch(parsed.device, requireArg(value, "app"), output);
+    await commandLaunch(deviceArg, requireArg(args.join(" "), "app"), output);
     return;
   }
 
   if (action === "type") {
-    await commandType(parsed.device, requireArg(value, "text"), output);
+    await commandType(deviceArg, requireArg(args.join(" "), "text"), output);
     return;
   }
 
   if (action === "hold") {
-    const key = resolveKey(requireArg(parsed.args[1], "key"));
-    const ms = requireArg(parsed.args[2], "ms");
-    await commandHold(parsed.device, key, ms, output);
+    await commandHold(deviceArg, resolveKey(requireArg(args[0], "key")), requireArg(args[1], "ms"), output);
     return;
   }
 
@@ -353,7 +427,7 @@ async function commandAction(args: string[], output: OutputMode): Promise<void> 
     throw new CliError(`Unknown action: ${action}`);
   }
 
-  await commandKey(parsed.device, key, output);
+  await commandKey(deviceArg, key, output);
 }
 
 async function resolveDevice(deviceArg: string): Promise<{ client: RokuClient; ip: string; name?: string; savedDevice?: SavedDevice }> {
@@ -407,6 +481,36 @@ async function fetchAppsOrEmpty(client: RokuClient): Promise<RokuApp[]> {
     return await client.getApps();
   } catch {
     return [];
+  }
+}
+
+async function getDefaultDeviceName(): Promise<string> {
+  const config = await readConfig();
+
+  if (config.defaultDevice && config.devices[config.defaultDevice]) {
+    return config.defaultDevice;
+  }
+
+  const savedNames = Object.keys(config.devices);
+
+  if (savedNames.length === 1) {
+    return savedNames[0];
+  }
+
+  if (savedNames.length === 0) {
+    throw new CliError("No saved devices. Run: roku discover, then roku add <target>.");
+  }
+
+  throw new CliError("No current device set. Run: roku use <device> or pass --device <device>.");
+}
+
+async function findSavedDeviceName(target: string): Promise<string | undefined> {
+  const config = await readConfig();
+
+  try {
+    return await resolveSavedDeviceForRemoval(target, config);
+  } catch {
+    return undefined;
   }
 }
 
@@ -647,8 +751,22 @@ Setup:
   add <ip|id|name>
   add <name> <ip>
   remove <ip|id|name>
+  use <device>
+  current
 
-Agent commands:
+Use:
+  <device> status
+  <device> channels
+  <device> launch <channel>
+  <device> home
+  <device> volume-up
+
+Current device shortcuts:
+  launch <channel>
+  home
+  status
+
+Agent:
   devices
   channels --device <device>
   status --device <device>
@@ -658,10 +776,10 @@ Examples:
   roku discover --json
   roku add <ip|id|name>
   roku add <ip|id|name> --name <name>
-  roku action launch Netflix --device <name>
-  roku action home --device <name>
-  roku action type "star trek" --device <name>
-  roku status --device <name> --json
+  roku use <name>
+  roku <name> launch Netflix
+  roku <name> home
+  roku action launch Netflix --device <name> --json
 
 Advanced/debug commands:
   roku help advanced`);
@@ -675,10 +793,23 @@ Setup and agent commands:
   add <ip|id|name>
   add <name> <ip>
   remove <ip|id|name>
+  use <device>
+  current
   devices
   channels --device <device>
   status --device <device>
   action <action> [value] --device <device>
+
+Human commands:
+  <device> status
+  <device> channels
+  <device> launch <channel>
+  <device> home|back|select|up|down|left|right
+  <device> play|pause|rewind|forward
+  <device> volume-up|volume-down|mute
+  <device> power|power-on|power-off
+  <device> channel-up|channel-down
+  <device> input-tuner|input-hdmi1|input-hdmi2|input-hdmi3|input-hdmi4
 
 Low-level/debug commands:
   list

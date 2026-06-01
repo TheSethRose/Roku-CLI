@@ -23,6 +23,7 @@ export interface SavedDevice {
 
 export interface Config {
   devices: Record<string, SavedDevice>;
+  defaultDevice?: string;
 }
 
 export interface DeviceListEntry {

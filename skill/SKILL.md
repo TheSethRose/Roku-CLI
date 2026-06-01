@@ -36,6 +36,22 @@ bun run src/cli.ts action type "star trek" --device living-room
 bun run src/cli.ts status --device living-room --json
 ```
 
+Human-friendly commands may use device-first grammar:
+
+```bash
+bun run src/cli.ts living-room launch Netflix
+bun run src/cli.ts living-room home
+bun run src/cli.ts living-room status
+```
+
+Users can set a current device for shorter manual commands:
+
+```bash
+bun run src/cli.ts use living-room
+bun run src/cli.ts launch Netflix
+bun run src/cli.ts home
+```
+
 ## Command Pattern
 
 Prefer these agent-facing commands:
@@ -43,7 +59,6 @@ Prefer these agent-facing commands:
 ```bash
 bun run src/cli.ts devices --json
 bun run src/cli.ts channels --device <device> --json
-bun run src/cli.ts known-channels --json
 bun run src/cli.ts status --device <device> --json
 bun run src/cli.ts action <action> [value] --device <device>
 bun run src/cli.ts remove <ip|device-id|serial|saved-name>
@@ -75,11 +90,14 @@ hold <key> <ms>
 ## Rules
 
 - Treat Roku control as stateless. There is no connect or disconnect step.
+- For agent automation, prefer `action <action> [value] --device <device>` and `status --device <device> --json`.
+- For human-facing examples, prefer `roku <device> <action>` or `roku use <device>` followed by short commands.
 - Use `add <target>` after discovery; target may be IP, device id, serial number, or friendly name. The CLI prompts for the saved name in interactive shells.
 - Use `add <target> --name <saved-name>` in noninteractive agent runs.
 - Prefer saved device names over raw IPs after setup, but `--device` may also be a saved IP, Roku device id, serial number, or saved Roku friendly name.
-- Use `channels --device <device> --json` to list installed apps/channels when the Roku allows it.
-- If `channels` fails with Limited mode, use `known-channels --json` and launch common apps by name.
+- `add` caches installed channels when the Roku allows channel listing.
+- Use `channels --device <device> --json` to list installed apps/channels.
+- If `channels` fails with Limited mode, launch can still use cached channel ids or built-in common ids.
 - If an action fails with HTTP 403, tell the user to set Roku `Settings > System > Advanced system settings > Control by mobile apps > Network access` to `Permissive`.
 - Use `--json` for inspection commands when another agent will parse output.
 - Do not call `apps` before `action launch`; launch resolves and refreshes apps itself.

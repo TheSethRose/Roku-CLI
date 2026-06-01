@@ -56,6 +56,10 @@ export async function removeDevice(name: string): Promise<string> {
   }
 
   delete config.devices[normalized];
+  if (config.defaultDevice === normalized) {
+    delete config.defaultDevice;
+  }
+
   await writeConfig(config);
   return normalized;
 }
@@ -63,5 +67,8 @@ export async function removeDevice(name: string): Promise<string> {
 function isConfig(value: unknown): value is Config {
   if (!value || typeof value !== "object") return false;
   const maybe = value as { devices?: unknown };
-  return Boolean(maybe.devices && typeof maybe.devices === "object" && !Array.isArray(maybe.devices));
+  if (!maybe.devices || typeof maybe.devices !== "object" || Array.isArray(maybe.devices)) return false;
+
+  const defaultDevice = (maybe as { defaultDevice?: unknown }).defaultDevice;
+  return defaultDevice === undefined || typeof defaultDevice === "string";
 }

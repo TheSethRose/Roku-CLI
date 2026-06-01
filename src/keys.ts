@@ -28,7 +28,8 @@ export const ALLOWED_KEYS = [
   "InputHDMI1",
   "InputHDMI2",
   "InputHDMI3",
-  "InputHDMI4"
+  "InputHDMI4",
+  "InputAV1"
 ] as const;
 
 export type RokuKey = (typeof ALLOWED_KEYS)[number];
@@ -47,6 +48,11 @@ export const CONVENIENCE_KEYS: Record<string, RokuKey> = {
   down: "Down",
   left: "Left",
   right: "Right",
+  info: "Info",
+  replay: "InstantReplay",
+  search: "Search",
+  enter: "Enter",
+  backspace: "Backspace",
   play: "Play",
   pause: "Play",
   rewind: "Rev",
@@ -54,7 +60,17 @@ export const CONVENIENCE_KEYS: Record<string, RokuKey> = {
   "volume-up": "VolumeUp",
   "volume-down": "VolumeDown",
   mute: "VolumeMute",
-  power: "Power"
+  power: "Power",
+  "power-on": "PowerOn",
+  "power-off": "PowerOff",
+  "channel-up": "ChannelUp",
+  "channel-down": "ChannelDown",
+  "input-tuner": "InputTuner",
+  "input-hdmi1": "InputHDMI1",
+  "input-hdmi2": "InputHDMI2",
+  "input-hdmi3": "InputHDMI3",
+  "input-hdmi4": "InputHDMI4",
+  "input-av1": "InputAV1"
 };
 
 export function resolveKey(input: string): RokuKey {

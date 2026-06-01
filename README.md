@@ -15,10 +15,11 @@ bun install
 ```sh
 bun run src/cli.ts discover
 bun run src/cli.ts add 192.168.1.78
-bun run src/cli.ts action launch Netflix --device living-room
-bun run src/cli.ts action home --device living-room
-bun run src/cli.ts action type "star trek" --device living-room
-bun run src/cli.ts status --device living-room
+bun run src/cli.ts use living-room
+bun run src/cli.ts living-room launch Netflix
+bun run src/cli.ts living-room home
+bun run src/cli.ts living-room type "star trek"
+bun run src/cli.ts living-room status
 ```
 
 Most commands also support JSON output:
@@ -53,7 +54,7 @@ Roku ECP is stateless HTTP, so there is no connect or disconnect step. Discover/
 
 ```sh
 bun run src/cli.ts discover --json
-bun run src/cli.ts add 192.168.1.78
+bun run src/cli.ts add 192.168.1.78 --name living-room
 bun run src/cli.ts action launch Netflix --device living-room
 ```
 
@@ -89,6 +90,27 @@ Preferred agent command pattern:
 bun run src/cli.ts action <action> [value] --device <saved-device-name>
 ```
 
+## Human Workflow
+
+Use device-first commands:
+
+```sh
+bun run src/cli.ts living-room status
+bun run src/cli.ts living-room channels
+bun run src/cli.ts living-room launch Disney
+bun run src/cli.ts living-room home
+bun run src/cli.ts living-room volume-up
+```
+
+Set a current device for shorter commands:
+
+```sh
+bun run src/cli.ts use living-room
+bun run src/cli.ts launch Netflix
+bun run src/cli.ts home
+bun run src/cli.ts current
+```
+
 Examples:
 
 ```sh
@@ -110,10 +132,27 @@ add <ip|id|name>
 add <ip|id|name> --name <saved-name>
 add <name> <ip>
 remove <ip|id|name>
+use <device>
+current
 devices
 channels --device <device>
 status --device <device>
 action <action> [value] --device <device>
+```
+
+## Human Commands
+
+```text
+<device> status
+<device> channels
+<device> launch <channel>
+<device> type <text>
+<device> home|back|select|up|down|left|right
+<device> play|pause|rewind|forward
+<device> volume-up|volume-down|mute
+<device> power|power-on|power-off
+<device> channel-up|channel-down
+<device> input-tuner|input-hdmi1|input-hdmi2|input-hdmi3|input-hdmi4
 ```
 
 ## Advanced Commands
