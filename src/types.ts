@@ -25,6 +25,13 @@ export interface Config {
   devices: Record<string, SavedDevice>;
 }
 
+export interface DeviceListEntry {
+  name: string;
+  ip: string;
+  online: boolean;
+  activeApp: RokuActiveApp | null;
+}
+
 export interface DiscoveredDevice {
   ip: string;
   location: string;

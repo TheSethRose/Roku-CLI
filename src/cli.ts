@@ -1,10 +1,10 @@
 #!/usr/bin/env bun
 import { appsToCache, resolveApp } from "./app-resolver.ts";
-import { CONFIG_PATH, readConfig, saveDevice, writeConfig } from "./config.ts";
+import { CONFIG_PATH, readConfig, removeDevice, saveDevice, writeConfig } from "./config.ts";
 import { discoverRokus } from "./discovery.ts";
 import { CONVENIENCE_KEYS, resolveKey } from "./keys.ts";
 import { RokuClient } from "./roku-client.ts";
-import type { Config, OutputMode, RokuActiveApp, RokuApp, SavedDevice } from "./types.ts";
+import type { Config, DeviceListEntry, OutputMode, RokuActiveApp, RokuApp, SavedDevice } from "./types.ts";
 import { assertIp, clampNumber, CliError, isIp, normalizeName, parseJsonFlag, parsePositiveInt, requireArg } from "./utils.ts";
 
 const TEXT_MAX_LENGTH = 256;
@@ -13,6 +13,11 @@ async function main(): Promise<void> {
   const parsed = parseJsonFlag(Bun.argv.slice(2));
   const [command, ...args] = parsed.args;
   const output: OutputMode = parsed.json ? "json" : "text";
+
+  if (command === "help" && args[0] === "advanced") {
+    printAdvancedHelp();
+    return;
+  }
 
   if (!command || command === "help" || command === "--help" || command === "-h") {
     printHelp();
@@ -31,8 +36,17 @@ async function main(): Promise<void> {
     case "add":
       await commandAdd(requireArg(args[0], "name"), requireArg(args[1], "ip"), output);
       break;
+    case "remove":
+      await commandRemove(requireArg(args[0], "device"), output);
+      break;
+    case "devices":
+      await commandDevices(output);
+      break;
     case "list":
       await commandList(output);
+      break;
+    case "status":
+      await commandStatus(args, output);
       break;
     case "info":
       await commandInfo(requireArg(args[0], "device"), output);
@@ -54,6 +68,9 @@ async function main(): Promise<void> {
       break;
     case "type":
       await commandType(requireArg(args[0], "device"), args.slice(1).join(" "), output);
+      break;
+    case "action":
+      await commandAction(args, output);
       break;
     default:
       throw new CliError(`Unknown command: ${command}`);
@@ -96,36 +113,60 @@ async function commandAdd(name: string, ipInput: string, output: OutputMode): Pr
   print(output, { name: normalized, ip, configPath: CONFIG_PATH }, () => `Saved ${normalized} at ${ip}.`);
 }
 
-async function commandList(output: OutputMode): Promise<void> {
-  const config = await readConfig();
-  const entries = await Promise.all(
-    Object.entries(config.devices).map(async ([name, device]) => {
-      const client = new RokuClient(device.ip, 1500);
+async function commandRemove(deviceArg: string, output: OutputMode): Promise<void> {
+  const name = await removeDevice(deviceArg);
+  print(output, { name, removed: true }, () => `Removed ${name}.`);
+}
 
-      try {
-        const activeApp = await client.getActiveApp();
-        device.lastSeen = new Date().toISOString();
-        return { name, ip: device.ip, reachable: true, activeApp };
-      } catch {
-        return { name, ip: device.ip, reachable: false, activeApp: null };
-      }
-    })
-  );
+async function commandDevices(output: OutputMode): Promise<void> {
+  const devices = await getDeviceList();
 
-  await writeConfig(config);
-  print(output, entries, () => {
-    if (entries.length === 0) {
+  print(output, { devices }, () => {
+    if (devices.length === 0) {
       return `No saved devices. Add one with "roku add <name> <ip>".`;
     }
 
-    return entries
-      .map((entry) => {
-        const status = entry.reachable ? "online" : "offline";
-        const active = entry.activeApp ? `  active: ${formatActiveApp(entry.activeApp)}` : "";
-        return `${entry.name}  ${entry.ip}  ${status}${active}`;
-      })
-      .join("\n");
+    return devices.map(formatDeviceListEntry).join("\n");
   });
+}
+
+async function commandList(output: OutputMode): Promise<void> {
+  const devices = await getDeviceList();
+
+  print(output, devices, () => {
+    if (devices.length === 0) {
+      return `No saved devices. Add one with "roku add <name> <ip>".`;
+    }
+
+    return devices.map(formatDeviceListEntry).join("\n");
+  });
+}
+
+async function commandStatus(args: string[], output: OutputMode): Promise<void> {
+  const parsed = parseDeviceOption(args);
+  const deviceArg = parsed.device ?? parsed.args[0];
+
+  if (!deviceArg) {
+    throw new CliError("Missing required option: --device <device>");
+  }
+
+  const { client, name, ip } = await resolveDevice(deviceArg);
+
+  try {
+    const [deviceInfo, activeApp, apps] = await Promise.all([client.getDeviceInfo(), client.getActiveApp(), client.getApps()]);
+    await updateSavedDevice(name, {
+      deviceInfo,
+      apps: appsToCache(apps),
+      lastSeen: new Date().toISOString()
+    });
+
+    print(output, { device: name ?? deviceArg, ip, online: true, activeApp, deviceInfo, appCount: apps.length }, () => {
+      const active = activeApp ? formatActiveApp(activeApp) : "none";
+      return `${name ?? deviceArg}  ${ip}  online  active: ${active}  apps: ${apps.length}`;
+    });
+  } catch {
+    print(output, { device: name ?? deviceArg, ip, online: false, activeApp: null }, () => `${name ?? deviceArg}  ${ip}  offline`);
+  }
 }
 
 async function commandInfo(deviceArg: string, output: OutputMode): Promise<void> {
@@ -207,6 +248,41 @@ async function commandType(deviceArg: string, text: string, output: OutputMode):
   print(output, { device: deviceArg, length: text.length }, () => `Sent ${text.length} characters.`);
 }
 
+async function commandAction(args: string[], output: OutputMode): Promise<void> {
+  const parsed = parseDeviceOption(args);
+  const action = requireArg(parsed.args[0], "action");
+  const value = parsed.args.slice(1).join(" ");
+
+  if (!parsed.device) {
+    throw new CliError("Missing required option: --device <device>");
+  }
+
+  if (action === "launch") {
+    await commandLaunch(parsed.device, requireArg(value, "app"), output);
+    return;
+  }
+
+  if (action === "type") {
+    await commandType(parsed.device, requireArg(value, "text"), output);
+    return;
+  }
+
+  if (action === "hold") {
+    const key = resolveKey(requireArg(parsed.args[1], "key"));
+    const ms = requireArg(parsed.args[2], "ms");
+    await commandHold(parsed.device, key, ms, output);
+    return;
+  }
+
+  const key = CONVENIENCE_KEYS[action];
+
+  if (!key) {
+    throw new CliError(`Unknown action: ${action}`);
+  }
+
+  await commandKey(parsed.device, key, output);
+}
+
 async function resolveDevice(deviceArg: string): Promise<{ client: RokuClient; ip: string; name?: string; savedDevice?: SavedDevice }> {
   if (isIp(deviceArg)) {
     const ip = assertIp(deviceArg);
@@ -224,6 +300,26 @@ async function resolveDevice(deviceArg: string): Promise<{ client: RokuClient; i
   return { client: new RokuClient(savedDevice.ip), ip: savedDevice.ip, name, savedDevice };
 }
 
+async function getDeviceList(): Promise<DeviceListEntry[]> {
+  const config = await readConfig();
+  const devices = await Promise.all(
+    Object.entries(config.devices).map(async ([name, device]) => {
+      const client = new RokuClient(device.ip, 1500);
+
+      try {
+        const activeApp = await client.getActiveApp();
+        device.lastSeen = new Date().toISOString();
+        return { name, ip: device.ip, online: true, activeApp };
+      } catch {
+        return { name, ip: device.ip, online: false, activeApp: null };
+      }
+    })
+  );
+
+  await writeConfig(config);
+  return devices;
+}
+
 async function updateSavedDevice(name: string | undefined, patch: Partial<SavedDevice>): Promise<void> {
   if (!name) return;
 
@@ -235,12 +331,36 @@ async function updateSavedDevice(name: string | undefined, patch: Partial<SavedD
   await writeConfig(config);
 }
 
+function parseDeviceOption(args: string[]): { args: string[]; device?: string } {
+  const filtered: string[] = [];
+  let device: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+
+    if (arg === "--device") {
+      device = requireArg(args[index + 1], "device");
+      index += 1;
+    } else {
+      filtered.push(arg);
+    }
+  }
+
+  return { args: filtered, device };
+}
+
 function print(output: OutputMode, jsonValue: unknown, text: () => string): void {
   if (output === "json") {
     console.log(JSON.stringify(jsonValue, null, 2));
   } else {
     console.log(text());
   }
+}
+
+function formatDeviceListEntry(entry: DeviceListEntry): string {
+  const status = entry.online ? "online" : "offline";
+  const active = entry.activeApp ? `  active: ${formatActiveApp(entry.activeApp)}` : "";
+  return `${entry.name}  ${entry.ip}  ${status}${active}`;
 }
 
 function formatActiveApp(activeApp: RokuActiveApp): string {
@@ -250,9 +370,40 @@ function formatActiveApp(activeApp: RokuActiveApp): string {
 function printHelp(): void {
   console.log(`Usage: roku <command> [args] [--json]
 
-Commands:
+Setup:
   discover
   add <name> <ip>
+  remove <device>
+
+Agent commands:
+  devices
+  status --device <device>
+  action <action> [value] --device <device>
+
+Examples:
+  roku discover --json
+  roku add living-room 192.168.1.78
+  roku action launch Netflix --device living-room
+  roku action home --device living-room
+  roku action type "star trek" --device living-room
+  roku status --device living-room --json
+
+Advanced/debug commands:
+  roku help advanced`);
+}
+
+function printAdvancedHelp(): void {
+  console.log(`Usage: roku <command> [args] [--json]
+
+Setup and agent commands:
+  discover
+  add <name> <ip>
+  remove <device>
+  devices
+  status --device <device>
+  action <action> [value] --device <device>
+
+Low-level/debug commands:
   list
   info <device>
   apps <device>

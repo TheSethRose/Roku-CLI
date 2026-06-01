@@ -1,0 +1,4 @@
+interface:
+  display_name: "Roku TV Control"
+  short_description: "Control saved Roku TVs with explicit agent-safe commands."
+  default_prompt: "Discover Roku devices, register the intended TV, then use explicit commands such as roku action launch Netflix --device living-room."

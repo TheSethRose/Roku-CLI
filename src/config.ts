@@ -47,6 +47,19 @@ export async function saveDevice(name: string, device: SavedDevice): Promise<str
   return normalized;
 }
 
+export async function removeDevice(name: string): Promise<string> {
+  const normalized = normalizeName(name);
+  const config = await readConfig();
+
+  if (!config.devices[normalized]) {
+    throw new CliError(`Unknown device: ${name}`);
+  }
+
+  delete config.devices[normalized];
+  await writeConfig(config);
+  return normalized;
+}
+
 function isConfig(value: unknown): value is Config {
   if (!value || typeof value !== "object") return false;
   const maybe = value as { devices?: unknown };

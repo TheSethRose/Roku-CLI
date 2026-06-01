@@ -15,17 +15,18 @@ bun install
 ```sh
 bun run src/cli.ts discover
 bun run src/cli.ts add living-room 192.168.1.78
-bun run src/cli.ts list
-bun run src/cli.ts apps living-room
-bun run src/cli.ts launch living-room YouTube
-bun run src/cli.ts key living-room Home
-bun run src/cli.ts type living-room "star trek"
+bun run src/cli.ts action launch Netflix --device living-room
+bun run src/cli.ts action home --device living-room
+bun run src/cli.ts action type "star trek" --device living-room
+bun run src/cli.ts status --device living-room
 ```
 
 Most commands also support JSON output:
 
 ```sh
 bun run src/cli.ts discover --json
+bun run src/cli.ts devices --json
+bun run src/cli.ts status --device living-room --json
 ```
 
 ## Build
@@ -45,11 +46,49 @@ Saved devices live at:
 
 Device names are normalized to lowercase kebab-case. A device argument can be a saved name or a raw IP address. Raw IPs are not saved unless `add` is used.
 
-## Commands
+## Agent Workflow
+
+Roku ECP is stateless HTTP, so there is no connect or disconnect step. Discover/register a device once, then send fully qualified commands.
+
+```sh
+bun run src/cli.ts discover --json
+bun run src/cli.ts add living-room 192.168.1.78
+bun run src/cli.ts action launch Netflix --device living-room
+```
+
+Preferred agent command pattern:
+
+```text
+bun run src/cli.ts action <action> [value] --device <saved-device-name>
+```
+
+Examples:
+
+```sh
+bun run src/cli.ts devices --json
+bun run src/cli.ts status --device living-room --json
+bun run src/cli.ts action launch Netflix --device living-room
+bun run src/cli.ts action volume-up --device living-room
+bun run src/cli.ts action type "star trek" --device living-room
+bun run src/cli.ts remove living-room
+```
+
+## Primary Commands
 
 ```text
 discover
 add <name> <ip>
+remove <device>
+devices
+status --device <device>
+action <action> [value] --device <device>
+```
+
+## Advanced Commands
+
+These are kept for debugging and direct Roku protocol work. Agents should prefer `action`, `status`, and `devices`.
+
+```text
 list
 info <device>
 apps <device>
